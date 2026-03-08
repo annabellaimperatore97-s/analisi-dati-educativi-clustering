@@ -35,7 +35,7 @@ In particolare sono stati utilizzati:
 
 * **i-FCB**
 * **Cluster CA**
-* **K-means applicato alle coordinate MCA**
+* **MCA-K**
 
 Il confronto tra questi metodi permette di valutare come diverse tecniche di clustering rappresentino la struttura del dataset e di individuare eventuali gruppi significativi.
 
