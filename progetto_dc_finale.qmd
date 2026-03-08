@@ -1,0 +1,1666 @@
+---
+title: "Esplorazione di Strutture Latenti nei Dati Educativi: Un Confronto tra i-FCB, Cluster CA e MCA K-means"
+author: "Annabella Imperatore"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    number-sections: true
+    self-contained: true
+    embed-resources: true
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+---
+
+# Introduzione all'Analisi dei Profili di Apprendimento tramite Metodi di Clustering per Dati Binari
+
+## Contesto e Obiettivo dello Studio
+
+Nel contesto della valutazione educativa su larga scala, come le prove INVALSI, i dati raccolti sono spesso di natura dicotomica (risposte corrette/errate). L'analisi tradizionale di questi dati si limita frequentemente al calcolo di punteggi totali o medie, che, sebbene utili per una visione d'insieme, rischiano di mascherare pattern di apprendimento complessi e non lineari. Due studenti con lo stesso punteggio totale, infatti, potrebbero possedere competenze e lacune radicalmente diverse.
+
+Il presente studio si pone l'obiettivo di superare questo limite, applicando tecniche avanzate di **clustering e riduzione dimensionale** per identificare profili di competenza latenti all'interno di un campione simulato di 100 studenti del Grado 5. L'intento non è solo classificare gli studenti in base alla performance ("bravi" vs "meno bravi"), ma comprendere la **struttura qualitativa** delle loro competenze attraverso i quattro ambiti matematici principali: *Numeri*, *Spazio e Figure*, *Dati e Previsioni*, *Relazioni e Funzioni*.
+
+## Struttura dell'Analisi
+
+Il lavoro si articola nelle seguenti fasi:
+
+1.  **Analisi Esplorativa (MCA):** Una prima indagine per visualizzare la distribuzione generale degli studenti e la difficoltà degli item.
+
+2.  **Confronto Metodologico (Benchmarking):** Una valutazione comparativa rigorosa tra tre algoritmi (*MCAk*, *clusCA*, *iFCB*) utilizzando indici statistici di validità interna (ASW, CH) e di concordanza (ARI).
+
+3.  **Profilazione:** L'identificazione definitiva dei cluster di studenti tramite il metodo clusCA, rivelando una stratificazione della classe in 4 gruppi distinti.
+
+4.  **Caratterizzazione Pedagogica:** L'interpretazione dei cluster emersi non solo in termini statistici, ma educativi, evidenziando gruppi con specifici bisogni di recupero o potenziamento.
+
+I risultati di questo studio dimostrano come l'applicazione di algoritmi specifici per dati binari possa trasformare una semplice matrice di risposte 0/1 in una mappa cognitiva dettagliata, fornendo agli educatori strumenti più raffinati per la didattica personalizzata.
+
+# Caricamento e preparazione dataset
+
+La procedura di analisi ha preso avvio con l'importazione del dataset grezzo dal file `CampioneSimulato_n100.xlsx`. In via preliminare, si è proceduto alla normalizzazione dei nomi delle variabili per garantirne l'uniformità di formattazione.
+
+Successivamente, è stata applicata una logica di selezione automatica per isolare le variabili di interesse psicometrico. Nello specifico, l'algoritmo ha identificato e separato le colonne contenenti esclusivamente valori binari $\{0, 1\}$ — rappresentative delle risposte agli item del test — dalle altre variabili presenti (identificate nella sola colonna `studente_anonimo`). Questa operazione ha restituito un set di **37 item** distinti.
+
+Sulla matrice delle risposte così isolata sono stati eseguiti controlli di qualità (data cleaning). È stata verificata l'assenza di *item costanti* (variabili a varianza nulla in cui tutti i soggetti presentano la stessa risposta) e l'assenza di dati mancanti (*missing values*). L'analisi ha confermato che il dataset è completo e privo di item non discriminativi.
+
+Il risultato finale del pre-processing è una matrice di dati $100 \times 37$ (100 studenti per 37 item), interamente composta da valori binari e idonea alle successive fasi di modellazione statistica.
+
+```{r}
+# Load & clean 
+set.seed(2026)
+library(readxl)
+library(dplyr)
+library(janitor)
+
+# file 
+path <- "CampioneSimulato_n100.xlsx"
+raw <- readxl::read_xlsx(path)
+dat <- janitor::clean_names(raw)
+```
+
+```{r, results='hide'}
+# funzione: TRUE se una colonna contiene solo 0/1/NA
+is_binary01 <- function(x) {
+  if (!is.numeric(x)) return(FALSE)
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  all(ux %in% c(0, 1))
+}
+
+# 1) Separa colonne binarie e colonne "altre"
+bin_cols <- names(dat)[sapply(dat, is_binary01)]
+other_cols <- setdiff(names(dat), bin_cols)
+
+length(bin_cols)
+bin_cols
+
+# 2) Dataset item (solo 0/1)
+X <- dat %>% select(all_of(bin_cols))
+
+# 3) Check dimensioni e valori
+dim(X)
+sort(unique(as.vector(as.matrix(X))))
+
+# 4) Rimuove item costanti (tutti 0 o tutti 1) se presenti
+p_item <- colMeans(X, na.rm = TRUE)
+const_items <- names(p_item[p_item %in% c(0,1)])
+const_items
+
+X2 <- X %>% select(-any_of(const_items))
+```
+
+```{r, results='hide'}
+# 5) Missing: per ora rimuoviamo studenti con NA 
+n_na_rows <- sum(!complete.cases(X2))
+X_complete <- X2 %>% tidyr::drop_na()
+
+list(
+  n_other_cols = length(other_cols),
+  other_cols = other_cols,
+  n_binary_items = ncol(X),
+  n_const_items = length(const_items),
+  removed_const_items = const_items,
+  n_rows_with_na = n_na_rows,
+  dim_complete = dim(X_complete)
+)
+```
+
+# Statistiche Descrittive e Idoneità del Dataset
+
+## Difficoltà item
+
+In questa fase si è proceduto all'analisi descrittiva delle proprietà psicometriche degli item, focalizzandosi sull'indice di difficoltà (p). Per item dicotomici, tale indice corrisponde alla media dei punteggi e rappresenta la proporzione di soggetti che ha risposto correttamente al quesito.
+
+I valori di p sono stati calcolati per tutti i 37 item e ordinati in modo crescente. L'esame dei risultati evidenzia un range di difficoltà compreso tra **0.33** e **0.90**. Nello specifico:
+
+-   Gli item più difficili risultano essere **d2** e **d9** (p=0.33), seguiti da **d4** (p=0.36).
+
+-   L'item più facile è il **d31**, con una proporzione di risposte corrette pari a **0.90**, seguito da **d25** (0.84) e **d35** (0.82).
+
+L'ispezione grafica della distribuzione (Barplot della difficoltà) permette di valutare l'adeguatezza degli item rispetto alle soglie critiche prefissate di 0.10 e 0.90 (rappresentate dalle linee tratteggiate). Si osserva che nessun item scende sotto la soglia inferiore (effetto pavimento assente), mentre solo l'item **d31** tocca la soglia superiore di 0.90 (rischio lieve di effetto soffitto). Nel complesso, la maggior parte degli item si colloca in una fascia centrale di difficoltà media, ideale per massimizzare la varianza del test.
+
+| item | p_correct |
+|------|-----------|
+| d31  | 0.90      |
+| d25  | 0.84      |
+| d35  | 0.82      |
+
+| item | p_correct |
+|------|-----------|
+| d2   | 0.33      |
+| d9   | 0.33      |
+| d4   | 0.36      |
+
+```{r}
+# Descrittive essenziali 
+library(dplyr)
+library(tidyr)
+
+X <- X_complete
+
+# 1) Difficoltà item
+p_item <- colMeans(X)
+
+item_summary <- tibble(
+  item = names(p_item),
+  p_correct = as.numeric(p_item)
+) %>% arrange(p_correct)
+
+
+# Palette colore in base alla difficoltà
+cols <- colorRampPalette(c("#d73027", "#fee08b", "#1a9850"))(
+  nrow(item_summary)
+)
+
+op <- par(no.readonly = TRUE)
+par(mar = c(5, 9, 4, 2))
+
+barplot(
+  height = item_summary$p_correct,
+  names.arg = item_summary$item,
+  horiz = TRUE,
+  las = 1,
+  col = cols,
+  border = "white",
+  xlab = "Proporzione di risposte corrette (p)",
+  main = "Difficoltà degli item",
+  cex.names = 0.9,
+  cex.lab = 1.1,
+  cex.main = 1.2
+)
+
+abline(v = c(0.1, 0.9), lty = 2, lwd = 2, col = "grey40")
+text(c(0.1, 0.9), par("usr")[4], labels = c("Troppo difficile", "Troppo facile"),
+     pos = 3, col = "grey40", cex = 0.8)
+
+par(op)
+```
+
+## Distribuzione del punteggio totale
+
+A complemento dell'analisi sui singoli item, si è proceduto all'esame della distribuzione del **punteggio grezzo totale** (somma dei punteggi 0/1 per soggetto).
+
+Le statistiche descrittive calcolate su $N=100$ soggetti mostrano un punteggio medio di **20.6** ($SD = 7.12$) e una mediana di **21**. La prossimità tra media e mediana suggerisce una distribuzione dei punteggi sostanzialmente simmetrica, priva di *skewness* marcata, come evidenziato anche dall'ispezione visiva dell'istogramma.
+
+Il range dei punteggi osservati varia da un minimo di **6** a un massimo di **36** (su un massimo teorico di 37). L'ampiezza di questo intervallo, unita alla deviazione standard rilevata, indica che il test possiede una buona capacità discriminante, riuscendo a differenziare efficacemente i soggetti lungo un ampio continuum di abilità. Non si osservano concentrazioni anomale agli estremi (effetti pavimento o soffitto sul punteggio totale).
+
+Infine, la procedura di screening per gli **item estremi** ha confermato la solidità dello strumento. Utilizzando le soglie convenzionali ($p \le 0.10$ per item molto difficili e $p \ge 0.90$ per item molto facili), l'analisi ha rilevato:
+
+-   **0 item molto difficili**;
+
+-   **1 solo item molto facile** (il già citato *d31*).
+
+Ciò conferma che lo strumento è ben calibrato per la popolazione esaminata, evitando la presenza di quesiti inutilmente punitivi o eccessivamente banali.
+
+| n_items | n_very_easy | n_very_hard |
+|---------|-------------|-------------|
+| 37      | 1           | 0           |
+
+| n   | min | q1  | median | mean | q3  | max | sd      |
+|-----|-----|-----|--------|------|-----|-----|---------|
+| 100 | 6   | 15  | 21     | 20.6 | 25  | 36  | 7.12089 |
+
+```{r, results='hide'}
+# Punteggio totale
+score_total <- rowSums(X)
+score_df <- tibble(score_total = score_total)
+
+score_stats <- score_df %>%
+  summarise(
+    n = n(),
+    min = min(score_total),
+    q1 = quantile(score_total, 0.25),
+    median = median(score_total),
+    mean = mean(score_total),
+    q3 = quantile(score_total, 0.75),
+    max = max(score_total),
+    sd = sd(score_total)
+  )
+
+score_stats
+```
+
+```{r}
+op <- par(no.readonly = TRUE)
+par(mar = c(5, 5, 4, 2))
+
+h <- hist(
+  score_total,
+  breaks = seq(min(score_total, na.rm = TRUE) - 0.5,
+               max(score_total, na.rm = TRUE) + 0.5, by = 1),
+  main = "Distribuzione del punteggio totale",
+  xlab = "Punteggio totale (0–37)",
+  ylab = "Frequenza",
+  col = "lightblue",
+  border = "white"
+)
+
+col_media   <- "yellow"  # oppure "#FFD700"
+col_mediana <- "red"     # oppure "#D62728"
+
+abline(v = mean(score_total, na.rm = TRUE),   lty = 2, lwd = 2, col = col_media)
+abline(v = median(score_total, na.rm = TRUE), lty = 3, lwd = 2, col = col_mediana)
+
+legend(
+  "topright",
+  legend = c(
+    paste0("Media = ", round(mean(score_total, na.rm = TRUE), 2)),
+    paste0("Mediana = ", round(median(score_total, na.rm = TRUE), 2))
+  ),
+  lty = c(2, 3),
+  lwd = 2,
+  col = c(col_media, col_mediana),
+  bty = "n"
+)
+
+par(op)
+
+# Item estremi
+extremes <- item_summary %>%
+  summarise(
+    n_items = n(),
+    n_very_easy = sum(p_correct >= 0.90),
+    n_very_hard = sum(p_correct <= 0.10)
+  )
+
+```
+
+## Heatmap
+
+**Analisi delle associazioni tra item (Correlazione Phi)**
+
+Per indagare la struttura relazionale interna del test, è stata calcolata la matrice di correlazione tra i 37 item. Data la natura dicotomica delle variabili (risposte 0/1), la misura statistica appropriata utilizzata è il **coefficiente di correlazione Phi (**$\phi$).
+
+**Nota metodologica:** Il coefficiente Phi rappresenta una misura di associazione specifica per due variabili binarie ed è algebricamente equivalente al coefficiente $r$ di Pearson applicato a dati dicotomici. Il suo valore oscilla tra -1 (perfetta associazione negativa) e +1 (perfetta associazione positiva), passando per 0 (assenza di relazione). Nel contesto psicometrico, correlazioni positive indicano che chi risponde correttamente a un item tende a rispondere correttamente anche all'altro, suggerendo che entrambi misurano il medesimo costrutto latente.
+
+**Risultati:**
+
+Le statistiche di sintesi della matrice $\phi$ (calcolata su tutte le coppie di item) mostrano una prevalenza di associazioni positive, ma di intensità medio-bassa.
+
+-   La **correlazione media** è pari a **0.14**, con una mediana anch'essa di **0.14**. Questo indica la presenza di una "positive manifold" (tendenza generale degli item a correlare positivamente), tipica dei test di prestazione, seppur debole.
+
+-   Il range varia da un minimo di **-0.24** a un massimo di **0.51**. L'assenza di correlazioni molto elevate ($> 0.80$) è un segnale positivo, in quanto suggerisce che non vi sono item ridondanti (ovvero domande che duplicano la stessa informazione).
+
+| min        | q1         | median    | mean      | q3       | max       |
+|------------|------------|-----------|-----------|----------|-----------|
+| -0.2371017 | 0.05379504 | 0.1417774 | 0.1381793 | 0.217749 | 0.5144728 |
+
+**Analisi grafica (Heatmap):**
+
+La struttura delle correlazioni è visualizzata tramite una *heatmap*, dove gli item sono stati riordinati utilizzando un algoritmo di *clustering gerarchico* (metodo average linkage) per avvicinare visivamente gli item più simili tra loro.
+
+-   Le aree colorate in **rosso** indicano correlazioni positive: la predominanza di questa tinta conferma la coerenza interna di base dello strumento.
+
+-   Le aree in **bianco/azzurro** indicano correlazioni nulle o lievemente negative. La presenza di valori negativi (fino a -0.24), seppur limitata, suggerisce che alcuni item potrebbero comportarsi in modo parzialmente indipendente o multidimensionale rispetto al resto del test.
+
+```{r}
+# Phi correlation + heatmap
+X <- X_complete
+phi <- cor(as.matrix(X), use = "pairwise.complete.obs")
+
+d  <- as.dist(1 - phi)
+hc <- hclust(d, method = "average")
+ord <- hc$order
+phi_ord <- phi[ord, ord]
+
+pal <- colorRampPalette(c("#2C7BB6", "#F7F7F7", "#D7191C"))(201)
+
+plot_phi_heatmap <- function(phi_mat, labels, show_legend = FALSE, legend_width = 0.06, cex_axis = 0.55) {
+  n <- ncol(phi_mat)
+
+  if (show_legend) {
+    layout(matrix(c(1, 2), 1, 2), widths = c(1, legend_width))
+  } else {
+    layout(matrix(1, 1, 1))
+  }
+
+  op <- par(no.readonly = TRUE)
+  on.exit({ par(op); layout(1) }, add = TRUE)
+
+  par(mar = c(6, 6, 4, 1))
+  image(1:n, 1:n, t(phi_mat)[, n:1],
+        col = pal, zlim = c(-1, 1),
+        axes = FALSE, asp = 1,
+        main = "Heatmap correlazioni Phi tra item")
+  axis(1, at = 1:n, labels = labels, las = 2, cex.axis = cex_axis)
+  axis(2, at = 1:n, labels = rev(labels), las = 2, cex.axis = cex_axis)
+  box()
+
+  if (show_legend) {
+    par(mar = c(6, 1, 4, 4))
+    y <- seq(-1, 1, length.out = 201)
+    image(1, y, matrix(y, nrow = 1),
+          col = pal, zlim = c(-1, 1),
+          axes = FALSE, xlab = "", ylab = "")
+    axis(4, at = seq(-1, 1, by = 0.5), las = 2, cex.axis = 0.8)
+    mtext("phi", side = 4, line = 2)
+    box()
+  }
+}
+
+
+plot_phi_heatmap(phi_ord, colnames(phi_ord), show_legend = FALSE)
+
+# Riassunto numerico
+upper_vals <- phi[upper.tri(phi)]
+assoc_summary <- tibble(
+  min = min(upper_vals),
+  q1 = quantile(upper_vals, 0.25),
+  median = median(upper_vals),
+  mean = mean(upper_vals),
+  q3 = quantile(upper_vals, 0.75),
+  max = max(upper_vals)
+)
+```
+
+# MCA (Analisi delle Corrispondenze Multiple)
+
+**Analisi delle Corrispondenze Multiple (MCA)**
+
+Al fine di esplorare la struttura latente del questionario e ridurre la dimensionalità dei dati, è stata condotta un'Analisi delle Corrispondenze Multiple (MCA). Questa tecnica rappresenta l'estensione dell'Analisi delle Componenti Principali (PCA) per dati categorici; è stata preferita in questo contesto poiché le variabili (item) sono di natura nominale dicotomica (0/1) e non continue.
+
+Prima dell'analisi, le variabili sono state convertite in fattori (*factors*) per garantire il corretto trattamento algebrico da parte dell'algoritmo. L'obiettivo dell'MCA è identificare un numero ridotto di "dimensioni" (o fattori) che riassumano la maggior parte dell'informazione contenuta nei 37 item originali.
+
+**Analisi dell'Inerzia e Scree Plot** L'esame degli autovalori (*eigenvalues*) e della percentuale di inerzia spiegata permette di valutare la dimensionalità del test.
+
+-   La **Dimensione 1** spiega da sola il **18.26%** dell'inerzia totale. Sebbene possa sembrare una percentuale bassa in assoluto (comune nei dati binari con molte variabili), il distacco rispetto alla seconda dimensione è marcato.
+
+-   La **Dimensione 2** spiega il **5.81%**, e dalla terza in poi le quote si stabilizzano attorno al 5-3%.
+
+Il "salto" (o gomito) tra la prima e la seconda dimensione suggerisce la presenza di un forte fattore generale dominante.
+
+```{r, results='hide'}
+# MCA, convertiamo 0/1 in factor
+
+library(FactoMineR)
+library(dplyr)
+
+X <- X_complete
+
+# 1) conversione robusta: ogni colonna come factor con livelli 0 e 1
+X_fac <- X %>%
+  mutate(across(everything(), ~ factor(.x, levels = c(0, 1))))
+
+# Check: tutte factor
+sapply(X_fac, class) |> table()
+
+# Check: livelli presenti (devono essere 0 e 1)
+lapply(X_fac[1:5], levels)
+
+# 2) MCA
+mca_res <- FactoMineR::MCA(X_fac, graph = FALSE)
+
+# 3) autovalori / inerzia
+eig <- as.data.frame(mca_res$eig)
+colnames(eig) <- c("eigenvalue", "percent", "cum_percent")
+eig$dim <- seq_len(nrow(eig))
+eig
+```
+
+## Scree plot
+
+```{r}
+# Scree plot 
+
+op <- par(no.readonly = TRUE)
+par(mar = c(5, 5, 4, 2))
+plot(
+  eig$dim, eig$percent,
+  type = "b",
+  xlab = "Dimensione",
+  ylab = "% inerzia",
+  main = "Scree plot MCA (% inerzia per dimensione)"
+)
+abline(v = 2, lty = 2)  
+abline(v = 3, lty = 2)
+par(op)
+```
+
+## Mappa degli Individui (Score Map)
+
+La proiezione degli studenti sul piano fattoriale formato dalle prime due dimensioni mostra la distribuzione dei soggetti nello spazio delle risposte.
+
+-   L'asse orizzontale (**Dim 1**) rappresenta la variabilità principale: gli studenti si distribuiscono da sinistra a destra (o viceversa) verosimilmente in base alla loro performance complessiva (dal punteggio totale basso al punteggio alto).
+
+-   L'asse verticale (**Dim 2**) cattura pattern di risposta secondari residui, non legati direttamente alla performance principale.
+
+La disposizione a "nuvola allungata" lungo l'asse orizzontale conferma che la differenza principale tra gli studenti risiede nel livello di competenza misurato dal test.
+
+```{r}
+
+# Mappa individui (studenti) Dim 1-2
+
+ind <- as.data.frame(mca_res$ind$coord)
+
+op <- par(no.readonly = TRUE)
+par(mar = c(5, 5, 4, 2))
+plot(
+  ind[, 1], ind[, 2],
+  pch = 19, cex = 0.6,
+  xlab = "Dim 1",
+  ylab = "Dim 2",
+  main = "MCA - Mappa degli individui (Dim 1 vs Dim 2)"
+)
+abline(h = 0, v = 0, lty = 2)
+par(op)
+```
+
+## Analisi dei Contributi delle Modalità (MCA)
+
+L'analisi dei contributi permette di identificare quali specifiche modalità di risposta (0 = Errato, 1 = Corretto) determinano la costruzione degli assi fattoriali.
+
+**Interpretazione della Dimensione 1 (Fattore Generale/Performance):**
+
+L'esame dei contributi rivela che questa dimensione contrappone il successo in item complessi all'errore in item discriminanti.
+
+-   Il contributo singolo più elevato è dato dalla modalità **d34_0** (risposta errata all'item 34, contributo 3.87), seguita dalla risposta corretta all'item **d14_b_1** (3.65) e dall'errore sull'item **d8_0** (3.23).
+
+-   È interessante notare come l'asse sia definito tanto dalla capacità di rispondere correttamente a domande chiave (come la *d14_b*), quanto dalla "gravità" dell'errore su domande come la *d34* e la *d8*. Questo mix di modalità 0 e 1 conferma che l'asse ordina gli studenti lungo un continuum di abilità, penalizzando fortemente specifici errori.
+
+**Interpretazione della Dimensione 2 (Fattore Specifico/Anomalie):**
+
+La seconda dimensione presenta una struttura peculiare dominata da pattern di risposta atipici.
+
+-   Il contributo in assoluto più alto è dato dalla modalità **d31_0** (risposta errata all'item 31), con un valore eccezionale di **8.50**. Considerando che l'item *d31* era risultato il più facile del test ($p=0.90$), l'errore in questa domanda rappresenta una forte anomalia statistica che caratterizza univocamente questo asse.
+
+-   Seguono le modalità dell'item **d26** (sia risposta corretta che errata hanno pesi elevati: 6.35 e 5.86), suggerendo che questo specifico quesito polarizza fortemente il secondo fattore, distinguendo gruppi di studenti in base a logiche diverse dalla semplice difficoltà generale.
+
+```{r, results='hide'}
+
+var_contrib <- as.data.frame(mca_res$var$contrib)
+
+contrib_1 <- var_contrib[, 1:2, drop = FALSE]
+names(contrib_1) <- c("Dim1", "Dim2")
+
+contrib_1$item <- rownames(var_contrib)  # etichette robuste
+
+top_dim1 <- contrib_1 %>% arrange(desc(Dim1)) %>% head(10)
+top_dim2 <- contrib_1 %>% arrange(desc(Dim2)) %>% head(10)
+
+top_dim1
+top_dim2
+```
+
+```{r}
+plot_top_contrib <- function(values, labels, title,
+                             col_bar = "#4C78A8",
+                             cex_axis = 0.9, cex_lab = 0.85) {
+
+  op <- par(no.readonly = TRUE)
+  on.exit(par(op), add = TRUE)
+
+  par(mar = c(5, 9, 4, 2))
+
+  bp <- barplot(
+    height = values,
+    names.arg = labels,
+    horiz = TRUE,
+    las = 1,
+    col = col_bar,
+    border = "white",
+    main = title,
+    xlab = "Contributo",
+    cex.axis = cex_axis
+  )
+
+  # griglia leggera verticale
+  abline(v = pretty(values), col = "grey85", lwd = 1)
+
+  # ristampa le barre sopra la griglia (trucco semplice)
+  barplot(
+    height = values,
+    names.arg = labels,
+    horiz = TRUE,
+    las = 1,
+    col = col_bar,
+    border = "white",
+    add = TRUE,
+    axes = FALSE
+  )
+
+  # etichette numeriche a destra delle barre
+  text(
+    x = values,
+    y = bp,
+    labels = format(round(values, 2), nsmall = 2),
+    pos = 4,
+    xpd = TRUE,
+    cex = cex_lab,
+    col = "grey10"
+  )
+
+  box(col = "grey60")
+}
+
+```
+
+```{r}
+plot_top_contrib(
+  values = top_dim1$Dim1,
+  labels = top_dim1$item,
+  title  = "Top 10 contributi (modalità=1) - Dim 1",
+  col_bar = "#F58518"   # arancione
+)
+
+```
+
+```{r}
+plot_top_contrib(
+  values = top_dim2$Dim2,
+  labels = top_dim2$item,
+  title  = "Top 10 contributi (modalità=1) - Dim 2",
+  col_bar = "#54A24B"   # verde
+)
+
+```
+
+# Approccio sequenziale (tandem): MCA → K-means
+
+Nei dataset multivariati categorici o binari, un approccio molto diffuso consiste nel combinare **Multiple Correspondence Analysis (MCA)** e **K-means** in modo sequenziale. In questo schema, la MCA viene utilizzata come tecnica di **riduzione dimensionale** per proiettare le osservazioni in uno spazio euclideo di dimensione ridotta d, mentre K-means opera successivamente sulle **coordinate fattoriali** (factor scores) per individuare K gruppi omogenei.
+
+Questo approccio è spesso motivato da due ragioni pratiche:
+
+\(i\) trasformare dati categoriali in coordinate quantitative idonee a K-means;
+
+\(ii\) ridurre la dimensionalità e, in parte, il rumore, concentrando il clustering sulle componenti che spiegano la quota maggiore di inerzia.
+
+## Criticità metodologiche dell’approccio tandem
+
+Nonostante la sua semplicità, la tandem analysis presenta limiti ben noti.
+
+1.  **Disallineamento degli obiettivi (rappresentazione vs separazione)**\
+    La MCA è costruita per massimizzare la qualità della rappresentazione globale (inerzia complessiva) e non per massimizzare la separazione tra cluster. Di conseguenza, le dimensioni che spiegano più inerzia possono non coincidere con quelle più discriminanti ai fini della partizione. In casi frequenti, la struttura di cluster è contenuta in direzioni a inerzia relativamente bassa e rischia di essere attenuata o persa se si selezionano poche dimensioni.
+
+2.  **Scelta di** d come fonte di instabilità\
+    La necessità di scegliere a priori il numero di dimensioni d introduce un elemento critico: valori piccoli di d possono semplificare eccessivamente la struttura dei dati (underfitting), mentre valori elevati possono reintrodurre rumore e instabilità (overfitting) nel clustering. Inoltre, l’ordine delle componenti MCA è determinato dalla rappresentazione globale, non dalla separazione tra gruppi.
+
+3.  **“Doppio uso” dei dati e sovra-ottimismo in valutazione interna**\
+    Se la bontà del clustering viene valutata nello stesso spazio fattoriale che è stato stimato sui dati, gli indici di qualità (ASW, Calinski–Harabasz) possono risultare ottimisti: la geometria del low-space è un prodotto del metodo di riduzione e non un riferimento neutrale.
+
+4.  **Sensibilità di K-means (inizializzazioni e minimi locali)**\
+    K-means è sensibile all’inizializzazione e può convergere a minimi locali; pertanto, la stabilità richiede tipicamente molte repliche (multi-start) e una scelta accurata di K.
+
+Questi limiti hanno motivato lo sviluppo di metodi che stimano **congiuntamente** (e non in sequenza) lo spazio latente e la partizione, riducendo il rischio che la rappresentazione fattoriale sia subottimale per la segmentazione.
+
+# Metodi “joint”: riduzione dimensionale e clustering stimati congiuntamente
+
+## Idea generale
+
+I metodi di **joint dimension reduction & clustering** mirano a superare la logica “prima riduco, poi clusterizzo” integrando le due componenti in un’unica procedura di stima. In tali metodi, lo spazio latente non è un pre-processing fisso, ma viene aggiornato iterativamente insieme all’allocazione ai cluster: in altri termini, la rappresentazione è appresa in funzione della partizione e, simultaneamente, la partizione è stimata nello spazio appreso.
+
+Dal punto di vista algoritmico, questi approcci adottano tipicamente uno schema di ottimizzazione alternata: dato un clustering provvisorio si aggiornano le quantificazioni/coordinate (parte “fattoriale”), quindi si aggiornano i cluster (parte “K-means”), ripetendo fino a convergenza. Questa famiglia di metodi è implementata, per dati categorici, nel pacchetto *clustrd* (Markos, Iodice D’Enza & van de Velden, 2019).
+
+## Implicazione per la valutazione: low-space vs spazio originale
+
+Un aspetto cruciale è distinguere tra:
+
+-   **tuning interno** nello spazio ridotto (low-space), utile per confronti *all’interno dello stesso metodo*;
+
+-   **validazione** nello spazio originale (full-space), necessaria per confronti più “oggettivi” e tra metodi diversi.
+
+Gli indici calcolati nel low-space non sono direttamente confrontabili tra metodi, poiché ogni metodo genera uno spazio latente con geometria specifica. La validazione nel full-space (ad es. con distanze adeguate per variabili categoriali, come Gower) riduce il rischio di selezionare configurazioni che appaiono “ottime” solo perché indotte dalla proiezione.
+
+# MCA K-means (MCAk): metodo congiunto di Hwang, Dillon & Takane (2006)
+
+## Definizione e obiettivo
+
+Il metodo **MCA K-means (MCAk)** proposto da Hwang, Dillon e Takane (2006) è un approccio **congiunto** che combina:
+
+-   un termine di adattamento di tipo **MCA** (qualità della rappresentazione in bassa dimensione delle variabili categoriche),
+
+-   un termine di tipo **K-means** (compattezza intra-cluster e separazione inter-cluster nello spazio latente).
+
+L’elemento distintivo è che la stima avviene ottimizzando una funzione obiettivo unica che bilancia i due termini tramite un parametro di trade-off α (in *clustrd* `alphak`). Con α elevato, la soluzione tende a preservare maggiormente la geometria MCA; con α più basso, la procedura privilegia maggiormente la separazione tra cluster.
+
+**Interpretazione e output**
+
+MCAk restituisce:
+
+-   coordinate delle osservazioni nello spazio ridotto;
+
+-   quantificazioni delle categorie (coordinate delle modalità);
+
+-   centroidi e assegnazione ai cluster.
+
+Ne risulta una rappresentazione integrata (biplot) in cui la posizione relativa di individui, categorie e centroidi è coerente con una soluzione che bilancia **struttura associativa globale** e **segmentazione**.
+
+**Vantaggi rispetto alla tandem**
+
+Rispetto a MCA → K-means, MCAk riduce il rischio che lo spazio latente sia subottimale per il clustering: lo spazio viene infatti aggiornato in funzione della partizione corrente. In applicazioni in cui i gruppi differiscono per pattern categoriali specifici, questa integrazione può produrre cluster più coerenti e più interpretabili.
+
+## Fase 1 – Tuning interno nello spazio ridotto (`dst = "low"`)
+
+Nella prima fase, per ciascun metodo, è stato effettuato un tuning esplorativo del numero di cluster e della dimensionalità latente utilizzando indici di qualità calcolati **nello spazio ridotto stimato dal metodo stesso** (`dst = "low"`). In particolare, sono stati considerati:
+
+-   l’Average Silhouette Width (ASW);
+
+-   l’indice di Calinski–Harabasz (CH).
+
+Questi indici sono stati utilizzati **esclusivamente per confronti interni a ciascun metodo**, poiché nello spazio ridotto la geometria dei dati dipende direttamente dall’algoritmo di riduzione dimensionale e, pertanto, i valori non sono confrontabili tra metodi diversi.
+
+I risultati mostrano che:
+
+-   con d=2 , sia ASW che CH raggiungono il massimo per K=3;
+
+-   con d=3, entrambi gli indici indicano come ottimale K=4;
+
+-   il miglioramento di ASW passando da (d=2,K=3) a (d=3,K=4) è tuttavia **molto contenuto** (0.961 → 0.964).
+
+Questi valori elevatissimi di ASW nello spazio ridotto sono attesi e riflettono il fatto che, nello spazio latente, i punti vengono proiettati in modo da enfatizzare la separazione tra i centroidi. Di conseguenza, tali indici sono informativi per la selezione preliminare di K e d, ma **non rappresentano una misura oggettiva della qualità del clustering sui dati originali**.
+
+| Dimensionalità (d) | Cluster (K) | ASW_low | CH_low   |
+|--------------------|-------------|---------|----------|
+| 2                  | 3           | 0.961   | 17 344.8 |
+| 2                  | 4           | 0.954   | 11 661.2 |
+| 2                  | 5           | 0.949   | 10 864.1 |
+| 3                  | 4           | 0.964   | 15 926.6 |
+| 3                  | 5           | 0.955   | 12 548.7 |
+
+```{r, results='hide'}
+#low per confronto interno
+library(clustrd)
+set.seed(2026)
+
+X_jdr <- X_fac
+
+t_mcak_asw_d2_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "MCAk",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_mcak_asw_d2_l
+summary(t_mcak_asw_d2_l)
+
+t_mcak_ch_d2_l<- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "MCAk",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_mcak_ch_d2_l
+summary(t_mcak_ch_d2_l)
+```
+
+```{r, results='hide'}
+#low per confronto interno 
+set.seed(2026)
+
+
+t_mcak_asw_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,  
+  ndimrange  = 3,
+  method = "MCAk",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+print(t_mcak_asw_d3_l)
+summary(t_mcak_asw_d3_l)
+
+
+set.seed(2026)
+
+t_mcak_ch_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,
+  ndimrange  = 3,
+  method = "MCAk",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_mcak_ch_d3_l
+summary(t_mcak_ch_d3_l)
+```
+
+```{r, results='hide'}
+library(clustrd) 
+best_mcak_2d3k <- t_mcak_asw_d2_l$clusobjbest   # MCAk: d=2, K=3
+best_mcak_3d4k <- t_mcak_asw_d3_l$clusobjbest   # MCAk: d=3, K=4
+
+best_mcak_2d3k$odata <- X_jdr
+best_mcak_3d4k$odata <- X_jdr
+
+v1 <- clustrd:::clusval(best_mcak_2d3k, dst = "full")
+v2 <- clustrd:::clusval(best_mcak_3d4k, dst = "full")
+
+v1$asw; v1$ch
+v2$asw; v2$ch
+```
+
+## Fase 2 – Validazione sullo spazio originale (`dst = "full"`)
+
+Nella seconda fase, le soluzioni selezionate in `low` sono state valutate sullo **spazio originale dei dati** (`dst = "full"`), utilizzando distanze di Gower per variabili categoriali/binari. Questa fase ha l’obiettivo di fornire una misura più oggettiva della qualità del clustering e consente il confronto tra configurazioni alternative e, più in generale, tra metodi diversi.
+
+Per MCAk sono state confrontate due soluzioni candidate:
+
+-   soluzione parsimoniosa: d=2,K=3
+
+-   soluzione più complessa: d=3,K=4
+
+I risultati della validazione in `full` sono riportati nella Tabella:
+
+| Dimensionalità (d) | Cluster (K) | ASW_full | CH_full |
+|--------------------|-------------|----------|---------|
+| 2                  | 3           | 0.142    | 21.43   |
+| 3                  | 4           | 0.107    | 16.69   |
+
+La validazione sullo spazio originale evidenzia in modo chiaro che:
+
+-   la soluzione (d=2,K=3) presenta valori più elevati sia di ASW_full sia di CH_full;
+
+-   la soluzione (d=3,K=4), pur apparendo leggermente migliore nello spazio ridotto, **perde qualità quando valutata sui dati originali**.
+
+In particolare, l’ASW_full scende da 0.142 a 0.107, indicando una riduzione della separazione effettiva tra i cluster nello spazio osservato. Questo risultato suggerisce che l’introduzione di un quarto cluster in MCAk riflette principalmente una struttura indotta dalla proiezione fattoriale, piuttosto che una separazione robusta nei dati originali.
+
+## Scelta finale del modello MCAk
+
+Alla luce dei risultati ottenuti nelle due fasi, la soluzione finale per MCAk è stata selezionata considerando congiuntamente:
+
+-   il tuning interno nello spazio ridotto (`dst = "low"`),
+
+-   la validazione sullo spazio originale (`dst = "full"`),
+
+-   il principio di parsimonia.
+
+Sebbene la configurazione (d=3,K=4) mostri un ASW leggermente superiore nello spazio ridotto, la validazione in `full` indica chiaramente che la soluzione (d=2,K=3) è più robusta e meglio supportata dai dati originali. Pertanto, **per MCAk si assume come soluzione finale quella con 3 cluster in 2 dimensioni**.
+
+È inoltre importante notare che i valori di ASW_full risultano complessivamente contenuti (\< 0.25), indicando che la struttura di clustering è debole nello spazio osservato.
+
+## Grafico Biplot (MCAk)
+
+```{r}
+
+biplot_clustrd <- function(mod,
+                           dims = c(1, 2),
+                           main = "Biplot (low space)",
+                           show = c("obs", "centroids", "att"),
+                           att_label_quantile = 0.80,
+                           cex_obs = 0.7,
+                           cex_att = 0.7) {
+
+  stopifnot(all(c("obscoord","attcoord","centroid","cluster") %in% names(mod)))
+  obs <- as.matrix(mod$obscoord)[, dims, drop = FALSE]
+  att <- as.matrix(mod$attcoord)[, dims, drop = FALSE]
+  cen <- as.matrix(mod$centroid)[, dims, drop = FALSE]
+  clu <- mod$cluster
+
+  clu_levels <- sort(unique(clu))
+  k <- length(clu_levels)
+  pal <- grDevices::hcl.colors(max(k, 3), palette = "Dark 3")
+  col_map <- setNames(pal[seq_len(k)], clu_levels)
+
+  # Limiti grafico (includi anche centroidi e att)
+  x_all <- c(obs[,1], cen[,1], att[,1])
+  y_all <- c(obs[,2], cen[,2], att[,2])
+
+  op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+  par(mar = c(5,5,4,2))
+  plot(x_all, y_all, type = "n",
+       xlab = paste0("Dim ", dims[1]),
+       ylab = paste0("Dim ", dims[2]),
+       main = main)
+  abline(h = 0, v = 0, lty = 2, col = "grey60")
+
+  # Osservazioni
+  if ("obs" %in% show) {
+    points(obs, pch = 19, cex = cex_obs, col = col_map[as.character(clu)])
+  }
+
+  # Ellissi 75% (opzionali)
+  if (requireNamespace("car", quietly = TRUE) && "obs" %in% show) {
+    for (g in clu_levels) {
+      idx <- which(clu == g)
+      if (length(idx) >= 3) {
+        car::dataEllipse(x = obs[idx,1], y = obs[idx,2],
+                         levels = 0.75, add = TRUE,
+                         plot.points = FALSE, col = col_map[as.character(g)], lwd = 1.3)
+      }
+    }
+  }
+
+  # Centroidi
+  if ("centroids" %in% show) {
+    points(cen, pch = 8, cex = 1.2, lwd = 2)
+    text(cen, labels = paste0("C", rownames(cen) %||% seq_len(nrow(cen))),
+         pos = 3, cex = 0.9)
+  }
+
+  # Attributi/modalità 
+  if ("att" %in% show) {
+    d2 <- rowSums(att^2)
+    thr <- stats::quantile(d2, att_label_quantile, na.rm = TRUE)
+    keep <- d2 >= thr
+
+    points(att[!keep, , drop = FALSE], pch = 3, col = "grey70", cex = 0.6)
+    points(att[keep,  , drop = FALSE], pch = 4, col = "grey20", cex = 0.7)
+
+    # Etichette solo per quelli “lontani”
+    labs <- rownames(att)
+    if (!is.null(labs)) {
+      text(att[keep, , drop = FALSE], labels = labs[keep], cex = cex_att, pos = 4)
+    }
+  }
+
+  legend("topright",
+         legend = paste("Cluster", clu_levels),
+         col = col_map[as.character(clu_levels)],
+         pch = 19, bty = "n", cex = 0.9)
+}
+
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+```
+
+```{r}
+biplot_clustrd(best_mcak_2d3k,
+               main = "Biplot MCAk (low) — d=2, K=3",
+               show = c("obs","centroids","att"),
+               att_label_quantile = 0.85)
+```
+
+# Cluster Correspondence Analysis (clusCA): van de Velden (2016)
+
+## Definizione e logica del metodo
+
+La **Cluster Correspondence Analysis (clusCA)** è un metodo congiunto che integra l’Analisi delle Corrispondenze (CA) con la logica del clustering, con l’obiettivo di ottenere cluster **ottimamente separati rispetto alle distribuzioni sulle categorie**. In termini intuitivi, clusCA mira a costruire una rappresentazione in cui:
+
+-   i cluster risultano distanti se presentano profili categoriali diversi;
+
+-   le categorie risultano distanti se discriminano tra cluster (cioè se hanno distribuzioni diverse sui gruppi).
+
+Operativamente, dato un’allocazione provvisoria ai cluster Zk​, si costruisce una tabella di contingenza “cluster × categorie” e si applica CA per ottenere quantificazioni delle categorie; quindi, gli individui vengono rappresentati nello spazio ridotto e l’allocazione ai cluster viene aggiornata mediante K-means sulle coordinate. L’algoritmo alterna questi passi fino a convergenza.
+
+## Fase “low”: tuning nello spazio ridotto
+
+Nella prima fase è stata utilizzata la funzione `tuneclus()` variando K e d. La qualità della partizione è stata valutata calcolando le distanze tra individui **nello spazio delle coordinate fattoriali** (`dst="low"`), cioè nello spazio prodotto dalla riduzione dimensionale del metodo. In questo contesto sono stati impiegati due indicatori standard:
+
+-   **Average Silhouette Width (ASW)**, che valuta simultaneamente compattezza interna e separazione tra cluster (valori più alti indicano una struttura più netta);
+
+-   **Calinski–Harabasz (CH)**, rapporto (corretto) tra varianza tra cluster e varianza entro cluster (anche in questo caso, valori più alti sono preferibili).
+
+Per d=2, k∈{3,4,5}, entrambi i criteri (ASW e CH) selezionano come soluzione migliore K=4. Ripetendo il confronto su d=3 (con K∈{4,5} ), la soluzione migliore rimane K=4, ma con un decadimento dei valori di ASW e CH rispetto alla configurazione a due dimensioni.
+
+| Modello clusCA | Range K considerato | K ottimale | ASW (low) | CH (low) |
+|----------------|---------------------|------------|-----------|----------|
+| (d=2)          | 3–5                 | 4          | 0.503     | 186.602  |
+| (d=3)          | 4–5                 | 4          | 0.451     | 100.923  |
+
+```{r, results='hide'}
+#metodo con low 
+library(clustrd)
+
+set.seed(2026)
+
+tune_asw_d2_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "clusCA",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+tune_asw_d2_l
+summary(tune_asw_d2_l)
+
+
+tune_ch_d2_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "clusCA",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+tune_ch_d2_l
+summary(tune_ch_d2_l)
+```
+
+```{r, results='hide'}
+set.seed(2026)
+
+tune_asw_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,
+  ndimrange  = 3,
+  method = "clusCA",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+tune_asw_d3_l
+summary(tune_asw_d3_l)
+
+
+
+tune_ch_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,
+  ndimrange  = 3,
+  method = "clusCA",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+tune_ch_d3_l
+summary(tune_ch_d3_l)
+```
+
+## Fase “full”: validazione sul dato originale
+
+Per la validazione finale sono state confrontate le due soluzioni candidate più rilevanti emerse dal tuning:
+
+-   **clusCA** d=2 , k=4
+
+-   **clusCA** d=3 , k=4
+
+La validazione è stata condotta con `clusval()` calcolando le distanze **sui dati originali** (`dst="full"`). Trattandosi di variabili categoriali, la distanza utilizzata è la **distanza di Gower**, che consente di misurare la dissimilarità tra unità statistiche direttamente nello spazio delle variabili osservate. In questa fase, ASW e CH assumono un ruolo più “oggettivo”, perché non dipendono dalla geometria imposta dalla proiezione fattoriale.
+
+I risultati evidenziano che, pur essendo meno performante in “low”, la soluzione d=3,K=4 risulta **migliore in “full”** su entrambi i criteri.
+
+L’incremento dell’ASW in full (da 0.1027 a 0.1347) indica che, nel dato originale, la soluzione a tre dimensioni produce cluster mediamente più separati e coerenti rispetto alla soluzione a due dimensioni. Analogamente, anche il CH migliora (da 17.1447 a 18.0526), confermando una migliore separazione tra gruppi rispetto alla dispersione interna
+
+| Modello candidato | ASW (full) | CH (full)   |
+|-------------------|------------|-------------|
+| clusCA (d=2, K=4) | 0.1027     | 17.1447     |
+| clusCA (d=3, K=4) | **0.1347** | **18.0526** |
+
+```{r, results='hide'}
+library(clustrd)
+
+# Best objects (soluzioni ottimali emerse dalla fase low)
+best_clusca_2d4k <- tune_asw_d2_l$clusobjbest   
+best_clusca_3d4k <- tune_asw_d3_l$clusobjbest   
+
+# Assicuriamoci che l'oggetto contenga i dati originali (servono per dst="full")
+best_clusca_2d4k$odata <- X_jdr
+best_clusca_3d4k$odata <- X_jdr
+
+# Validazione FULL (distanze Gower sul dataset originale)
+v_full_2d4k <- clustrd:::clusval(best_clusca_2d4k, dst = "full")
+v_full_3d4k <- clustrd:::clusval(best_clusca_3d4k, dst = "full")
+
+# Risultati
+v_full_2d4k$asw; v_full_2d4k$ch
+v_full_3d4k$asw; v_full_3d4k$ch
+
+```
+
+## Scelta finale del modello
+
+La selezione conclusiva è stata guidata dalla validazione “full”, privilegiando la soluzione che massimizza la qualità del clustering **nel dato originale**, riducendo il rischio di sovra-ottimismo legato alla valutazione nello spazio proiettato.
+
+Pertanto, nonostante il tuning “low” favorisca d=2 , la validazione “full” mostra in modo consistente che la configurazione **clusCA con** k=4 cluster e d=3 dimensioni garantisce una separazione più robusta rispetto alle dissimilarità effettive tra osservazioni (Gower).
+
+## Grafico Biplot per clusCA
+
+```{r}
+best_clusca_3d4k <- tune_asw_d3_l$clusobjbest
+d <- c(1, 2)
+
+Y <- best_clusca_3d4k$obscoord[, d, drop = FALSE]
+G <- best_clusca_3d4k$centroid[, d, drop = FALSE]
+cl <- best_clusca_3d4k$cluster
+
+k <- length(unique(cl))
+cols <- as.integer(factor(cl))
+
+rx <- range(c(Y[,1], G[,1]))
+ry <- range(c(Y[,2], G[,2]))
+
+plot(Y, type = "n",
+     xlab = paste0("Dim ", d[1]), ylab = paste0("Dim ", d[2]),
+     xlim = rx, ylim = ry,
+     main = "clusCA (osservazioni e centroidi)")
+
+abline(h = 0, v = 0, lty = 3)
+points(Y, pch = 16, cex = 0.8, col = cols)
+
+points(G, pch = 8, cex = 1.6, lwd = 2)
+text(G, labels = paste0("C", 1:nrow(G)), pos = 3, cex = 0.9)
+
+legend("topright",
+       legend = paste0("Cluster ", 1:k),
+       pch = 16, col = 1:k, bty = "n", cex = 0.9)
+
+
+```
+
+```{r}
+library(plotly)
+
+
+# 1. Estrazione dei dati dal tuo oggetto
+# Coordinate delle osservazioni (i punti)
+obs_coords <- as.data.frame(best_clusca_3d4k$obscoord[, 1:3]) # Prende le prime 3 dimensioni
+colnames(obs_coords) <- c("Dim1", "Dim2", "Dim3")
+obs_coords$Cluster <- as.factor(best_clusca_3d4k$cluster) # Aggiunge i cluster
+
+# Coordinate degli attributi/variabili (le etichette del biplot)
+
+var_coords <- as.data.frame(best_clusca_3d4k$attcoord[, 1:3]) 
+colnames(var_coords) <- c("Dim1", "Dim2", "Dim3")
+var_coords$Label <- rownames(var_coords)
+
+# 2. Creazione del grafico 3D con Plotly
+fig <- plot_ly()
+
+# Aggiunge le OSSERVAZIONI (Punti colorati per cluster)
+fig <- add_trace(
+  fig,
+  data = obs_coords,
+  x = ~Dim1, y = ~Dim2, z = ~Dim3,
+  color = ~Cluster,
+  colors = "Set1",     # Palette di colori 
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 4, opacity = 0.8), # Dimensione e trasparenza punti
+  name = ~paste("Cluster", Cluster),
+  text = rownames(obs_coords), # Mostra il nome della riga al passaggio del mouse
+  hoverinfo = "text+name"
+)
+
+# Aggiunge gli ATTRIBUTI (Etichette di testo nello spazio)
+fig <- add_trace(
+  fig,
+  data = var_coords,
+  x = ~Dim1, y = ~Dim2, z = ~Dim3,
+  type = "scatter3d",
+  mode = "text",       # Solo testo, niente pallini per le variabili
+  text = ~Label,
+  textfont = list(color = 'black', size = 12, family = "Arial", weight = "bold"),
+  name = "Attributi",
+  hoverinfo = "text"
+)
+
+# 3. Layout e Stile (Titoli assi e aspetto generale)
+fig <- layout(
+  fig,
+  title = "3D Cluster Biplot",
+  scene = list(
+    xaxis = list(title = "Dimensione 1"),
+    yaxis = list(title = "Dimensione 2"),
+    zaxis = list(title = "Dimensione 3"),
+    camera = list(eye = list(x = 1.5, y = 1.5, z = 1.5)) # Punto di vista iniziale
+  ),
+  legend = list(title = list(text = "<b>Cluster</b>"))
+)
+
+# Mostra il grafico
+fig
+
+```
+
+# i-FCB: Iterative Factor Clustering of binary data (Iodice D’Enza & Palumbo, 2013)
+
+Il metodo **i-FCB** (*iterative factor clustering*) è un approccio di **joint dimension reduction & clustering** sviluppato per dati **binari** (e più in generale categoriali) ad alta dimensionalità. L’idea è stimare congiuntamente uno **spazio latente** a bassa dimensionalità e una partizione in K cluster, alternando una fase “fattoriale” e una fase di clustering fino a convergenza.
+
+La peculiarità di i-FCB è l’impiego della **Non-Symmetric Correspondence Analysis (NSCA)** applicata alla tabella di contingenza **cluster × categorie**: le righe (indicatori di membership) sono trattate come variabile di riferimento, mentre le categorie delle variabili osservate svolgono il ruolo di esplicative. In questo modo, le quantificazioni delle categorie vengono stimate in modo **mirato alla discriminazione** tra cluster, più che alla sola rappresentazione dell’inerzia globale.
+
+Operativamente, l’algoritmo procede iterativamente: (1) inizializza un’allocazione Zk​; (2) applica NSCA alla tabella cluster×categorie per ottenere le **quantificazioni di categoria**; (3) calcola le **coordinate dei soggetti** nello spazio ridotto utilizzando la matrice indicatrice centrata e pesata e le quantificazioni stimate; (4) aggiorna Zk mediante **K-means** sulle coordinate dei soggetti; (5) ripete i passi 2–4 fino a stabilità della partizione. L’output consiste in cluster membership, centroidi, coordinate individuali e coordinate/quantificazioni delle categorie, utili per interpretare i profili dei gruppi.
+
+## Risultati fase LOW (selezione candidate)
+
+Nella fase low, per d=2 la qualità del clustering aumenta passando da k=3 a k=4 e peggiora con k=5. In particolare la configurazione d=2, k=4, è risultata la migliore, con **ASW(low)=0.443** e **CH(low)=130.630**.\
+L’aumento della dimensionalità a d=3 non ha portato benefici: la migliore soluzione rimane k=4, ma con valori sensibilmente inferiori (**ASW(low)=0.349**, **CH(low)=74.942**). Questo indica che, per iFCB, una rappresentazione a due dimensioni appare sufficiente e più stabile/leggibile nel range di cluster considerato.
+
+| Dimensioni (d) | Cluster (k) | CH (low)    |
+|----------------|-------------|-------------|
+| 2              | 3           | 124.542     |
+| 2              | 4           | **130.630** |
+| 2              | 5           | 124.414     |
+| 3              | 4           | **74.942**  |
+| 3              | 5           | 71.427      |
+
+| Dimensioni (d) | Cluster (k) | ASW (low) |
+|----------------|-------------|-----------|
+| 2              | 3           | 0.433     |
+| 2              | 4           | **0.443** |
+| 2              | 5           | 0.395     |
+| 3              | 4           | **0.349** |
+| 3              | 5           | 0.316     |
+
+```{r, results='hide'}
+set.seed(2026)
+
+t_ifcb_asw_d2_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "iFCB",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_ifcb_asw_d2_l
+summary(t_ifcb_asw_d2_l)
+
+
+
+t_ifcb_ch_d2_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 3:5,
+  ndimrange  = 2,
+  method = "iFCB",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_ifcb_ch_d2_l
+summary(t_ifcb_ch_d2_l)
+```
+
+```{r, results='hide'}
+set.seed(2026)
+
+t_ifcb_asw_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,
+  ndimrange  = 3,
+  method = "iFCB",
+  criterion = "asw",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_ifcb_asw_d3_l
+summary(t_ifcb_asw_d3_l)
+
+
+
+t_ifcb_ch_d3_l <- tuneclus(
+  data = X_jdr,
+  nclusrange = 4:5,
+  ndimrange  = 3,
+  method = "iFCB",
+  criterion = "ch",
+  dst = "low",
+  nstart = 20,
+  seed = 2026
+)
+
+t_ifcb_ch_d3_l
+summary(t_ifcb_ch_d3_l)
+```
+
+## Risultati fase FULL (validazione su spazio originale)
+
+Le due soluzioni candidate emerse dalla fase low (**2d–4k** e **3d–4k**) sono state quindi validate sul dataset originale tramite **Gower**. I risultati confermano la preferenza per la soluzione bidimensionale:
+
+-   **iFCB d=2, k=4**: ASW(full)=**0.112774**, CH(full)=**16.08318**
+
+-   **iFCB d=3, k=4**: ASW(full)=**0.1011411**, CH(full)=**15.66298**
+
+Sebbene i valori full risultino (come atteso) molto più bassi dei corrispettivi low—perché qui la distanza è calcolata sulle variabili originali e non nello spazio “ottimizzato” fattorialmente—l’ordinamento tra soluzioni è coerente: **la soluzione d=2, k=4 mantiene una separazione migliore anche nello spazio originale**.
+
+| Soluzione     | ASW (low) | CH (low) | ASW (full)   | CH (full)    |
+|---------------|-----------|----------|--------------|--------------|
+| iFCB d=2, k=4 | 0.443     | 130.630  | **0.112774** | **16.08318** |
+| iFCB d=3, k=4 | 0.349     | 74.942   | 0.1011411    | 15.66298     |
+
+```{r, results='hide'}
+
+library(clustrd)
+
+# Candidate (migliori in low)
+best_ifcb_2d4k <- t_ifcb_asw_d2_l$clusobjbest
+best_ifcb_3d4k <- t_ifcb_asw_d3_l$clusobjbest
+
+# Inserisco i dati originali per dst="full"
+best_ifcb_2d4k$odata <- X_jdr
+best_ifcb_3d4k$odata <- X_jdr
+
+# Validazione FULL (Gower su X_jdr)
+v_full_ifcb_2d4k <- clustrd:::clusval(best_ifcb_2d4k, dst="full")
+v_full_ifcb_3d4k <- clustrd:::clusval(best_ifcb_3d4k, dst="full")
+
+# Output sintetico
+v_full_ifcb_2d4k$asw; v_full_ifcb_2d4k$ch
+v_full_ifcb_3d4k$asw; v_full_ifcb_3d4k$ch
+
+```
+
+## Grafico Biplot iFCB
+
+```{r}
+# Oggetto migliore iFCB (d=2, k=4) fase low
+best_ifcb_2d4k <- t_ifcb_asw_d2_l$clusobjbest
+
+# Funzione base per scatter: individui + centroidi
+biplot_ifcb_basic <- function(obj, dims = c(1,2), show_labels = FALSE) {
+  stopifnot(length(dims) == 2)
+  X <- obj$obscoord[, dims, drop = FALSE]
+  C <- obj$centroid[, dims, drop = FALSE]
+  cl <- obj$cluster
+
+  plot(X,
+       xlab = paste0("Dim.", dims[1]),
+       ylab = paste0("Dim.", dims[2]),
+       main = "iFCB – mappa individui e centroidi",
+       pch = 16,
+       col = cl)
+
+  points(C, pch = 8, cex = 1.6, lwd = 2)     # centroidi
+  text(C, labels = paste0("C", seq_len(nrow(C))),
+       pos = 3, cex = 0.9)
+
+  if (show_labels) {
+    text(X, labels = seq_len(nrow(X)), cex = 0.6, pos = 3)
+  }
+
+  legend("topright", legend = paste("Cluster", sort(unique(cl))),
+         col = sort(unique(cl)), pch = 16, bty = "n")
+}
+
+biplot_ifcb_basic(best_ifcb_2d4k, dims = c(1,2), show_labels = FALSE)
+
+```
+
+# Il Confronto Statistico + (ARI)
+
+La selezione del modello di clustering è stata condotta seguendo un approccio articolato in più fasi, volto a valutare congiuntamente qualità della partizione, coerenza rispetto ai dati originali e stabilità delle assegnazioni.
+
+In una prima fase, le soluzioni candidate sono state individuate sulla base dei criteri di Average Silhouette Width (ASW) e Calinski–Harabasz (CH) calcolati nello spazio ridotto (“low”), al fine di selezionare combinazioni di dimensionalità e numero di cluster in grado di produrre partizioni ben separate e compatte. In questa fase, MCAk (d = 2, K = 3) ha mostrato i valori più elevati di ASW e CH, indicando una struttura dei cluster particolarmente netta nello spazio fattoriale. Anche clusCA (d = 3, K = 4) e iFCB (d = 2, K = 4) hanno fornito soluzioni plausibili, seppur con indicatori leggermente inferiori.
+
+Successivamente, le soluzioni selezionate sono state validate rispetto ai dati originali mediante il calcolo di ASW (full) e CH (full) basati su distanze di Gower. Anche in questo caso, MCAk risulta la soluzione con le migliori prestazioni complessive, mentre clusCA presenta valori leggermente inferiori ma comunque comparabili. iFCB mostra invece una perdita più marcata in termini di qualità “full”.
+
+Accanto agli indici di qualità, è stata valutata la stabilità delle soluzioni tramite una procedura di subsampling all’80% delle osservazioni, utilizzando l’Adjusted Rand Index (ARI) come misura di accordo tra le partizioni ottenute su campioni parziali e quella di riferimento. I risultati indicano che MCAk presenta la stabilità media più elevata, ma anche una maggiore variabilità delle soluzioni, come evidenziato da un IQR più ampio. clusCA, pur mostrando un’ARI mediana leggermente inferiore, si distingue per una maggiore regolarità e robustezza, con una dispersione sensibilmente più contenuta. iFCB risulta il metodo meno stabile tra quelli considerati.
+
+Nel complesso, MCAk emerge come il metodo con le migliori prestazioni globali in termini di qualità della partizione e stabilità media. Tuttavia, la differenza rispetto a clusCA risulta contenuta, soprattutto nella validazione “full”, mentre clusCA (d = 3, K = 4) offre una rappresentazione in dimensione più elevata e una maggiore stabilità delle assegnazioni, aspetti particolarmente rilevanti in un’ottica di analisi interpretativa e valutativa.
+
+Alla luce di queste considerazioni, pur riconoscendo la superiorità complessiva di MCAk in termini di indicatori quantitativi, si è scelto di adottare clusCA (d = 3, K = 4) come modello di riferimento per l’analisi interpretativa, in quanto rappresenta il miglior compromesso tra qualità, stabilità e leggibilità sostantiva della struttura dei cluster.
+
+| Metodo | d | K | ASW (low) | CH (low) | ASW (full) | CH (full) | ARI mediana (80%) | ARI IQR |
+|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| MCAk | 2 | 3 | **0.96** | 17 344 | **0.142** | **21.43** | **0.592** | 0.289 |
+| clusCA | 3 | 4 | 0.451 | 100.92 | 0.135 | 18.05 | 0.493 | **0.130** |
+| iFCB | 2 | 4 | 0.443 | 130.63 | 0.113 | 16.08 | 0.425 | 0.146 |
+
+```{r, results='hide'}
+#========================
+# Subsampling stability (ARI)
+#========================
+
+# Pacchetti
+library(clustrd)
+library(mclust)   # adjustedRandIndex
+library(dplyr)
+
+#------------------------
+# 1) Fit "reference" (full data) per ciascun metodo
+#------------------------
+set.seed(2026)
+
+# Sostituisci con il tuo dataset
+data_full <- X_jdr
+
+# Scelte finali 
+# - MCAk: d=2, K=3
+# - clusCA: d=3, K=4
+# - iFCB: d=2, K=4
+ref_mcak   <- clusmca(data_full, nclus = 3, ndim = 2, method = "MCAk", alpha = 0.5, nstart = 20, seed = 2026)
+ref_clusca <- clusmca(data_full, nclus = 4, ndim = 3, method = "clusCA", nstart = 20, seed = 2026)
+ref_ifcb   <- clusmca(data_full, nclus = 4, ndim = 2, method = "iFCB",  nstart = 20, seed = 2026)
+
+# Etichette di riferimento (cluster membership sull'intero dataset)
+ref_lab <- list(
+  MCAk   = ref_mcak$cluster,
+  clusCA = ref_clusca$cluster,
+  iFCB   = ref_ifcb$cluster
+)
+
+#------------------------
+# 2) Funzione di stabilità con subsampling (without replacement)
+#------------------------
+subsampling_stability_ari <- function(data,
+                                      methods_spec,
+                                      ref_labels,
+                                      prop = 0.80,
+                                      B = 200,
+                                      nstart = 20,
+                                      seed = 2026) {
+  stopifnot(prop > 0 && prop < 1)
+
+  n <- nrow(data)
+  m <- ceiling(prop * n)
+
+  set.seed(seed)
+
+  # Preallocazione risultati: una colonna ARI per metodo
+  out <- as.data.frame(matrix(NA_real_, nrow = B, ncol = length(methods_spec)))
+  colnames(out) <- names(methods_spec)
+
+  # Loop ricampionamenti
+  for (b in seq_len(B)) {
+    idx <- sort(sample.int(n, size = m, replace = FALSE))
+    data_b <- data[idx, , drop = FALSE]
+
+    # Fit su subsample per ogni metodo
+    for (nm in names(methods_spec)) {
+      spec <- methods_spec[[nm]]
+
+      fit_b <- clusmca(
+        data_b,
+        nclus  = spec$nclus,
+        ndim   = spec$ndim,
+        method = spec$method,
+        alpha  = spec$alpha,
+        nstart = nstart,
+        seed   = seed + b   # varia il seed per evitare repliche identiche
+      )
+
+      # ARI tra:
+      # - cluster del subsample (fit_b$cluster)
+      # - cluster "reference" ristretto alle stesse unità (ref_labels[[nm]][idx])
+      out[b, nm] <- adjustedRandIndex(fit_b$cluster, ref_labels[[nm]][idx])
+    }
+  }
+
+  out
+}
+
+# Specifiche metodi 
+methods_spec <- list(
+  MCAk   = list(method = "MCAk",   nclus = 3, ndim = 2, alpha = 0.5),
+  clusCA = list(method = "clusCA", nclus = 4, ndim = 3, alpha = NULL),
+  iFCB   = list(method = "iFCB",   nclus = 4, ndim = 2, alpha = NULL)
+)
+
+#------------------------
+# 3) Esecuzione
+#------------------------
+ari_mat <- subsampling_stability_ari(
+  data = data_full,
+  methods_spec = methods_spec,
+  ref_labels = ref_lab,
+  prop = 0.80,
+  B = 200,       
+  nstart = 20,
+  seed = 2026
+)
+
+#------------------------
+# 4) Riassunto tabellare (media, mediana, sd, IQR, p10, p90)
+#------------------------
+ari_summary <- ari_mat |>
+  tidyr::pivot_longer(cols = everything(), names_to = "Metodo", values_to = "ARI") |>
+  group_by(Metodo) |>
+  summarise(
+    ARI_media   = mean(ARI, na.rm = TRUE),
+    ARI_mediana = median(ARI, na.rm = TRUE),
+    ARI_sd      = sd(ARI, na.rm = TRUE),
+    ARI_IQR     = IQR(ARI, na.rm = TRUE),
+    ARI_p10     = quantile(ARI, 0.10, na.rm = TRUE),
+    ARI_p90     = quantile(ARI, 0.90, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(ARI_media))
+
+print(ari_summary)
+
+```
+
+```{r}
+# Boxplot comparativo
+boxplot(ari_mat, las = 2, ylab = "ARI (subsampling 80%)", main = "Stabilità clustering (ARI)")
+abline(h = 0, lty = 3)
+
+```
+
+# Analisi dei Profili di Apprendimento e Performance per Ambito (Dati INVALSI)
+
+**Interpretazione Generale del Modello Radar**
+
+L’analisi grafica tramite radar permette una lettura immediata della qualità e della distribuzione delle competenze nei quattro ambiti fondamentali: *Numeri, Spazio e Figure, Dati e Previsioni, Relazioni e Funzioni*. In questo modello, l'ampiezza dell'area coperta dal radar è direttamente proporzionale alla percentuale media di risposte corrette: forme ampie e regolari indicano profili solidi e omogenei, mentre contrazioni o asimmetrie evidenziano lacune specifiche o sbilanciamenti nella preparazione degli studenti.
+
+Dall'analisi dei dati emergono quattro cluster distinti, che disegnano un chiaro gradiente di competenza.
+
+**1. Il Profilo di Eccellenza: Cluster 1**
+
+Il **Cluster 1** rappresenta il vertice delle performance ("Alti performanti e completi"). Questo gruppo dimostra una notevole solidità trasversale, mantenendo medie elevate in tutti i settori. Il dato più rilevante è il picco registrato nell'ambito *Relazioni e Funzioni* (**0,837**), che suggerisce non solo una padronanza dei contenuti, ma anche una spiccata capacità di astrazione e modellizzazione. L'assenza di aree critiche delinea un profilo di studenti in grado di gestire problemi complessi e di integrare competenze diverse (problem solving multi-step).
+
+**2. La Competenza Settoriale: Cluster 2**
+
+Il **Cluster 2** si posiziona su un livello intermedio, caratterizzato però da una specificità interessante. Sebbene le performance generali siano inferiori al primo gruppo, questi studenti mostrano una competenza in *Spazio e Figure* (**0,720**) quasi sovrapponibile a quella degli studenti eccellenti. Tuttavia, il profilo appare sbilanciato da una performance modesta nell'ambito *Numeri* (**0,489**). Didatticamente, siamo di fronte a un gruppo "spaziale-geometrico", dotato di buona intuizione visiva ma che necessita di rinforzo sul calcolo e sugli automatismi numerici.
+
+**3. Il Profilo Procedurale: Cluster 4**
+
+Scendendo nel gradiente di competenza, incontriamo il **Cluster 4**. Si tratta di un profilo medio-basso che potremmo definire "procedurale". Questi studenti ottengono risultati discreti negli ambiti più concreti e diretti, come *Numeri* (**0,560**) e *Spazio* (**0,524**), ma mostrano un crollo verticale quando è richiesto il ragionamento funzionale. Il punteggio in *Relazioni e Funzioni* si ferma a **0,408**, evidenziando una difficoltà marcata nella generalizzazione e nella comprensione delle relazioni tra grandezze variabili.
+
+**4. L'Area di Fragilità: Cluster 3**
+
+Il **Cluster 3** raggruppa gli studenti con le maggiori criticità ("Bassi performanti generalizzati"). Il grafico radar di questo gruppo appare contratto in modo uniforme, segnalando difficoltà diffuse che investono ogni ambito matematico. Le performance sono ovunque molto contenute, con il minimo assoluto registrato nuovamente in *Relazioni e Funzioni* (**0,276**). Questo quadro suggerisce una fragilità strutturale che richiede interventi prioritari sui prerequisiti fondamentali, sulla comprensione del testo matematico e sulle strategie di base.
+
+### Sintesi e Driver di Differenziazione
+
+Osservando l'insieme dei dati, emerge chiaramente che l'ambito **Relazioni e Funzioni** agisce come il principale discriminante (o *driver*) della performance complessiva. È la variabile che "separa" più nettamente i gruppi forti da quelli fragili: si passa infatti dall'eccellenza del Cluster 1 (**0,837**) alla criticità estrema del Cluster 3 (**0,276**).
+
+Questo conferma che la capacità di gestire relazioni, funzioni e modellizzazione matematica rappresenta lo scoglio cognitivo maggiore e, contemporaneamente, l'indicatore più affidabile del livello di maturità matematica raggiunto dagli studenti.
+
+```{r, results='hide'}
+# ==============================================================================
+# 4. PROFILAZIONE FINALE: Radar Chart per Ambiti INVALSI (MODELLO clusCA d=3,K=4)
+# ==============================================================================
+
+library(dplyr)
+library(fmsb)
+
+# --- 0. MODELLO DA USARE
+
+best_model <- best_clusca_3d4k  # clusCA (d=3, K=4)
+
+# --- 1. Mappatura Item-Ambiti ---
+item_map <- data.frame(
+  item = c("d1", "d2", "d3", "d4", "d5", "d6_a", "d6_b", "d7", "d8", "d9", 
+           "d10", "d11", "d12", "d13", "d14_a", "d14_b", "d15", "d16", "d17", 
+           "d18", "d19", "d20", "d21", "d22", "d23", "d24", "d25", "d26", 
+           "d27", "d28", "d29", "d30", "d31", "d32", "d33", "d34", "d35"),
+  ambito = c("Spazio_Figure", "Numeri", "Relazioni_Funz", "Dati_Prev", "Numeri",
+             "Dati_Prev", "Dati_Prev", "Numeri", "Relazioni_Funz", "Spazio_Figure",
+             "Numeri", "Numeri", "Spazio_Figure", "Spazio_Figure", "Dati_Prev",
+             "Dati_Prev", "Relazioni_Funz", "Relazioni_Funz", "Numeri",
+             "Relazioni_Funz", "Numeri", "Spazio_Figure", "Spazio_Figure", "Numeri",
+             "Dati_Prev", "Relazioni_Funz", "Dati_Prev", "Dati_Prev",
+             "Numeri", "Spazio_Figure", "Dati_Prev", "Numeri", "Spazio_Figure",
+             "Spazio_Figure", "Relazioni_Funz", "Numeri", "Numeri")
+)
+
+# --- 2. Preparazione e Pulizia Dati ---
+df_radar <- as.data.frame(X_jdr)
+
+# Convertiamo tutto in numerico (preserva 0/1 se factor -> character -> numeric)
+df_radar[] <- lapply(df_radar, function(x) {
+  if (is.factor(x)) as.numeric(as.character(x)) else as.numeric(x)
+})
+
+# Aggiungiamo il cluster del modello scelto (clusCA d=3,K=4)
+df_radar$Cluster <- factor(best_model$cluster)
+
+# --- 3. Calcolo Punteggi per Ambito ---
+
+calc_domain_score <- function(df_items, map, domain_label) {
+  
+  domain_items <- map$item[map$ambito == domain_label]
+  
+  # per ogni item costruisco la lista di colonne che lo rappresentano
+  cols_list <- lapply(domain_items, function(it) {
+    # match di superindicator (d1.0, d1.1, ...) oppure match esatto (d1)
+    c(grep(paste0("^", it, "\\."), colnames(df_items), value = TRUE),
+      intersect(colnames(df_items), it))
+  })
+  
+  # appiattisco e rendo uniche
+  valid_cols <- unique(unlist(cols_list))
+  valid_cols <- valid_cols[!is.na(valid_cols)]
+  
+  if (length(valid_cols) == 0) {
+    return(rep(NA_real_, nrow(df_items)))
+  }
+  
+  return(rowMeans(df_items[, valid_cols, drop = FALSE], na.rm = TRUE))
+}
+
+# Calcolo i 4 assi (ambiti)
+df_radar$Numeri    <- calc_domain_score(df_radar, item_map, "Numeri")
+df_radar$Spazio    <- calc_domain_score(df_radar, item_map, "Spazio_Figure")
+df_radar$Dati      <- calc_domain_score(df_radar, item_map, "Dati_Prev")
+df_radar$Relazioni <- calc_domain_score(df_radar, item_map, "Relazioni_Funz")
+
+# --- 4. Aggregazione Medie per Cluster ---
+radar_means <- df_radar %>%
+  group_by(Cluster) %>%
+  summarise(
+    Numeri    = mean(Numeri, na.rm = TRUE),
+    Spazio    = mean(Spazio, na.rm = TRUE),
+    Dati      = mean(Dati, na.rm = TRUE),
+    Relazioni = mean(Relazioni, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print("--- PERCENTUALI DI SUCCESSO PER AMBITO (MEDIE) ---")
+print(radar_means)
+
+
+radar_df <- radar_means %>%
+  select(Numeri, Spazio, Dati, Relazioni) %>%
+  as.data.frame()
+
+radar_df <- rbind(
+  max = rep(1, ncol(radar_df)),
+  min = rep(0, ncol(radar_df)),
+  radar_df
+)
+
+rownames(radar_df)[3:nrow(radar_df)] <- paste0("Cluster_", levels(df_radar$Cluster))
+
+
+
+
+
+```
+
+```{r}
+# --- 5. Grafico Radar (adattato a clusCA d=3, K=4) ---
+library(fmsb)
+
+
+
+# Preparazione dati per fmsb:
+radar_mat <- radar_means %>%
+  arrange(as.numeric(as.character(Cluster))) %>%   # ordina cluster 1..K
+  select(-Cluster) %>%
+  as.data.frame()
+
+radar_data <- rbind(
+  rep(1, ncol(radar_mat)),  # Max (100%)
+  rep(0, ncol(radar_mat)),  # Min (0%)
+  radar_mat                 # profili medi dei cluster
+)
+
+# Numero cluster
+K <- nrow(radar_mat)
+
+# Colori (4 cluster). Se K cambia, la palette si estende automaticamente.
+palette_border <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",
+                    "#FF7F00", "#A65628", "#F781BF", "#999999")
+colors_border <- palette_border[1:K]
+colors_fill   <- paste0(colors_border, "1A")  # trasparenza
+
+op <- par(no.readonly = TRUE)
+par(mar = c(1, 1, 2, 1))
+
+radarchart(radar_data,
+           axistype = 1,
+           pcol  = colors_border,
+           pfcol = colors_fill,
+           plwd  = 3,
+           plty  = 1,
+           cglcol = "grey", cglty = 1, axislabcol = "grey30",
+           caxislabels = paste0(seq(0, 100, 25), "%"),
+           cglwd = 0.8,
+           vlcex = 0.9,
+           title = paste0("Profili di Competenza: ", K, " Cluster (clusCA d=3, K=4)")
+)
+
+legend("topright",
+       legend = paste("Cluster", levels(radar_means$Cluster)),
+       bty = "n", pch = 20, col = colors_border, pt.cex = 2, cex = 0.9)
+
+par(op)
+
+```
+
+# Conclusioni e Limiti dell’Analisi
+
+**Sintesi del percorso metodologico e selezione del modello**
+
+L’obiettivo primario di questo lavoro è stato individuare una soluzione di clustering su dati categoriali che garantisse un equilibrio ottimale tra solidità statistica, stabilità strutturale e interpretabilità pedagogica. L'indagine si è avvalsa delle tecniche di riduzione dimensionale e clustering (Tandem Analysis) disponibili nel pacchetto *clustrd*, confrontando tre approcci principali: **MCA K-means**, **clusCA** e **iFCB**.
+
+Il processo di selezione ha seguito un iter rigoroso articolato in tre fasi:
+
+1.  **Analisi nello spazio ridotto (Low Space):** L'esplorazione iniziale, guidata dagli indici *Average Silhouette Width* (ASW) e *Calinski–Harabasz* (CH), ha suggerito consistentemente una struttura a **4 cluster** per tutti i metodi, pur con dimensionalità ottimali differenti.
+
+2.  **Validazione nello spazio originale (Full Space):** La successiva verifica sulle distanze di Gower ha evidenziato che, in termini puramente quantitativi, il metodo **MCA K-means** ($d=2, K=3$) massimizza la separazione globale. Tuttavia, **clusCA** ($d=3, K=4$) ha mantenuto performance competitive, superando nettamente l'approccio iFCB.
+
+3.  **Analisi di stabilità (Resampling):** Il test decisivo è stato condotto tramite subsampling e misurazione dell'Adjusted Rand Index (ARI). Qui è emerso il *trade-off* fondamentale: mentre MCA K-means offre la separazione media più alta, soffre di un'elevata variabilità; al contrario, **clusCA** si è dimostrato significativamente **più robusto e stabile** di fronte alle perturbazioni del campione.
+
+Alla luce di queste evidenze, la scelta è ricaduta sul modello **clusCA (**$d=3, K=4$). Tale configurazione è stata preferita perché offre il miglior compromesso: garantisce una tenuta statistica superiore (stabilità), preserva una struttura a 4 gruppi più informativa per l'analisi valutativa e fornisce strumenti grafici (biplot e radar) ideali per l'interpretazione dei profili.
+
+**Risultati sostanziali: i profili di competenza**
+
+L'applicazione del modello clusCA ha permesso di delineare un chiaro **gradiente di competenza** tra gli studenti, suddiviso in quattro profili distinti:
+
+-   Un cluster di **eccellenza**, con performance alte e trasversali.
+
+-   Un cluster **intermedio**, caratterizzato da una buona tenuta sull'ambito spaziale ma discontinuo altrove.
+
+-   Un cluster **medio-basso**, di natura "procedurale", che regge su compiti diretti ma crolla sulle astrazioni.
+
+-   Un cluster di **fragilità diffusa**, con performance basse in tutti gli ambiti.
+
+Il dato più rilevante emerso dall'analisi è il ruolo dell'ambito **Relazioni e Funzioni**: quest'area si conferma come il principale driver di differenziazione. La capacità di gestire l'astrazione funzionale è, di fatto, lo spartiacque tra i gruppi a performance alta e quelli in difficoltà.
+
+## Limiti dello studio e prospettive
+
+La validità delle conclusioni appena esposte deve essere tuttavia letta alla luce di alcune limitazioni intrinseche allo studio.
+
+Innanzitutto, la **dimensione campionaria** ridotta ($n=100$) impone cautela nella generalizzazione dei risultati. Un campione contenuto rende gli indici di qualità (ASW, CH) più sensibili alle variazioni locali e può influenzare le stime di stabilità, suggerendo che con un dataset più ampio potrebbero emergere sfumature strutturali differenti.
+
+In secondo luogo, la dipendenza dalle tecniche di **riduzione dimensionale** implica che la soluzione finale è comunque una proiezione: sebbene validata nello spazio originale, essa privilegia inevitabilmente alcune strutture di varianza a discapito di altre.
+
+Infine, l'interpretazione basata sulle medie di cluster, pur efficace per una sintesi "macro", non cattura la variabilità interna ai singoli gruppi né le interazioni a livello di singolo item (item-level).
+
+In conclusione, nonostante tali limiti, l'approccio integrato (tuning interno, validazione esterna e analisi di stabilità) ha permesso di isolare una soluzione metodologicamente difendibile e didatticamente preziosa. Il modello clusCA a 4 cluster offre una chiave di lettura solida per comprendere le dinamiche di apprendimento, ponendo le basi per interventi didattici mirati.
